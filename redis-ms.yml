@@ -1,0 +1,112 @@
+# Redis Master - Slave
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    type: "master-slave"
+  name: redis-ms
+  labels:
+    app: redis
+spec:
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: client
+  - port: 16379
+    targetPort: 16379
+    name: gossip
+  clusterIP: None
+  selector:
+    app: redis
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-ms-config
+data:
+  redis.conf: |+
+    cluster-enabled no
+    #
+  bootstrap-pod.sh: |+
+    #!/bin/sh
+    set -e
+
+    redis-server /conf/redis.conf &
+
+    # Wait until redis is ready
+    sleep 1
+    
+    master="redis-ms-0.redis-ms.default.svc.cluster.local"
+
+    if [[ $(hostname -f) == ${master} ]] ; then
+      echo "making myself master"
+      redis-cli slaveof no one
+    else
+      echo "making myself slave to ${master}"
+      redis-cli slaveof ${master} 6379
+    fi
+
+    wait
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: redis-ms
+spec:
+  serviceName: redis-ms
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: redis-ms
+        image: redis:3.2.10-alpine
+        ports:
+        - containerPort: 6379
+          name: client
+        - containerPort: 16379
+          name: gossip
+        command:
+        - sh
+        args:
+        - /conf/bootstrap-pod.sh
+        
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "redis-cli -h $(hostname) ping"
+          initialDelaySeconds: 15
+          timeoutSeconds: 5
+
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "redis-cli -h $(hostname) ping"
+          initialDelaySeconds: 20
+          periodSeconds: 3
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: conf
+          mountPath: /conf
+          readOnly: false
+      volumes:
+      - name: conf
+        configMap:
+          name: redis-ms-config
+          items: 
+          - key: redis.conf
+            path: redis.conf
+          - key: bootstrap-pod.sh  
+            path: bootstrap-pod.sh
+
