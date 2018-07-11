@@ -1,4 +1,6 @@
 # Redis Master - Slave
+# https://github.com/alieksanov/redis-ms/blob/master/redis-ms.yml
+#
 apiVersion: v1
 kind: Service
 metadata:
