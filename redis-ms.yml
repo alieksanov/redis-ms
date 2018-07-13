@@ -27,19 +27,16 @@ metadata:
   name: redis-ms-config
 data:
   redis.conf: |+
+    #
     cluster-enabled no
     #
   bootstrap-pod.sh: |+
     #!/bin/sh
     set -e
-
     redis-server /conf/redis.conf &
-
     # Wait until redis is ready
     sleep 1
-    
     master="redis-ms-0.redis-ms.default.svc.cluster.local"
-
     if [[ $(hostname -f) == ${master} ]] ; then
       echo "making myself master"
       redis-cli slaveof no one
@@ -47,8 +44,24 @@ data:
       echo "making myself slave to ${master}"
       redis-cli slaveof ${master} 6379
     fi
-
     wait
+  sentinel.conf: |+
+    port 26379
+    bind 0.0.0.0
+    sentinel monitor redis-master redis-ms-0.redis-ms.default.svc.cluster.local 6379 2
+    sentinel parallel-syncs redis-master 1
+    sentinel down-after-milliseconds redis-master 30000
+    sentinel failover-timeout redis-master 90000
+  sentinel.sh: |+
+    #!/bin/bash
+    master="redis-ms-0.redis-ms.default.svc.cluster.local"
+    while ! ping -c 1 ${master}; do
+      sleep 1
+    done
+    # Dirty hack against https://github.com/kubernetes/kubernetes/pull/58720
+    # TODO proper way to find
+    cp /conf/sentinel.conf /tmp/ && redis-sentinel /tmp/sentinel.conf
+    #
 ---
 apiVersion: apps/v1beta1
 kind: StatefulSet
@@ -75,7 +88,6 @@ spec:
         - sh
         args:
         - /conf/bootstrap-pod.sh
-        
         readinessProbe:
           exec:
             command:
@@ -84,7 +96,6 @@ spec:
             - "redis-cli -h $(hostname) ping"
           initialDelaySeconds: 15
           timeoutSeconds: 5
-
         livenessProbe:
           exec:
             command:
@@ -102,13 +113,25 @@ spec:
         - name: conf
           mountPath: /conf
           readOnly: false
+
+      - name: sentinel
+        image: redis:3.2.10-alpine
+        command:
+        - sh
+        args:
+        - /conf/sentinel.sh
+        volumeMounts:
+        - name: conf
+          mountPath: /conf 
+          readOnly: false
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+    
       volumes:
       - name: conf
         configMap:
           name: redis-ms-config
-          items: 
-          - key: redis.conf
-            path: redis.conf
-          - key: bootstrap-pod.sh  
-            path: bootstrap-pod.sh
-
+          defaultMode: 420
